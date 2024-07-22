@@ -9,6 +9,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/go-openapi/swag"
 )
 
 //go:generate mockgen -source=disk_ops.go -package=shared_ops -destination=mock_disk_ops.go
@@ -396,13 +397,43 @@ func (r *diskOps) RemoveDMDevice(dmDevice string) error {
 	return err
 }
 
+// Make sure devices are ordered in a manner that ensures they can be deleted
+// When using thin provisioning we have to contend with _tdata and _tmeta dmsetup records
+// These cannot be deleted until the main dmsetup record is deleted
+func (r *diskOps) sortDMDevicesForDeletion(dmDevices []string) []string {
+	rootDevices := []string{}
+	dependentDevices := []string{}
+	for _, dmDevice := range dmDevices {
+		if strings.HasSuffix(dmDevice, "_tdata") || strings.HasSuffix(dmDevice, "_tmeta") {
+			dependentDevices = append(dependentDevices, dmDevice)
+			continue
+		}
+		rootDevices = append(rootDevices, dmDevice)
+	}
+	return append(rootDevices, dependentDevices...)
+}
+
+func (r *diskOps) getBaseDMDevicesForThinProvisioning(dmDevices []string) []string {
+	baseDevices := []string{}
+	for _, dmDevice := range dmDevices {
+		if strings.HasSuffix(dmDevice, "_tdata") {
+			baseDevice := strings.Replace(dmDevice, "_tdata", "", 1)
+			if !swag.ContainsStrings(baseDevices, baseDevice) {
+				baseDevices = append(baseDevices, baseDevice)
+			}
+		}
+	}
+	return baseDevices
+}
+
 func (r *diskOps) RemoveAllDMDevicesOnDisk(diskName string) error {
 	var ret error
 	dmDevices, err := r.getDMDevices(diskName)
 	if err != nil {
 		return err
 	}
-	for _, dmDevice := range dmDevices {
+	devices := r.sortDMDevicesForDeletion(append(dmDevices, r.getBaseDMDevicesForThinProvisioning(dmDevices)...))
+	for _, dmDevice := range devices {
 		r.log.Infof("Removing DM device %s", dmDevice)
 		err = r.RemoveDMDevice(dmDevice)
 		if err != nil {
